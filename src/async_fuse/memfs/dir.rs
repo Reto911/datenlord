@@ -132,6 +132,11 @@ impl DirEntry {
         self.file_attr.read().kind
     }
 
+    /// Set name of the `DirEntry`.
+    pub(crate) fn set_entry_name(&mut self, name: String) {
+        self.name = name;
+    }
+
     /// Build `DirEntry` from `libc::dirent64`
     fn from_dirent(entry: &libc::dirent64) -> Self {
         let ino = entry.d_ino;
