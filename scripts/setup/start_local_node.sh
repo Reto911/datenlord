@@ -9,6 +9,8 @@ export RUST_BACKTRACE=1
 export ETCD_END_POINT=127.0.0.1:2379
 export BIND_MOUNTER=`realpath $BIND_MOUNTER`
 
+BUILD_FLAGS=$1
+
 . scripts/setup/config.sh
 . scripts/setup/setup_etcd.sh
 
@@ -32,7 +34,7 @@ fi
 
 echo "==> Start to deploy datenlord locally"
 echo "==> Building datenlord"
-cargo build
+cargo build $BUILD_FLAGS
 if [ $? -ne 0 ]; then
   echo "Failed to build datenlord."
   exit 1
