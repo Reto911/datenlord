@@ -133,6 +133,7 @@ impl DirEntry {
     }
 
     /// Set name of the `DirEntry`.
+    #[allow(dead_code)]
     pub(crate) fn set_entry_name(&mut self, name: String) {
         self.name = name;
     }

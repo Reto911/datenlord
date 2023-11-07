@@ -297,6 +297,7 @@ fn test_rename_file_replace(mount_dir: &Path) -> anyhow::Result<()> {
 }
 
 #[cfg(test)]
+#[cfg(feature = "abi-7-23")]
 fn test_rename_exchange(mount_dir: &Path) -> anyhow::Result<()> {
     use nix::{fcntl::RenameFlags, sys::stat};
 
@@ -322,7 +323,7 @@ fn test_rename_exchange(mount_dir: &Path) -> anyhow::Result<()> {
         fs::write(&file_a, "a")?;
         fs::write(file_b, "b")?;
 
-        /* Tree: 
+        /* Tree:
          * exchange
          * |- a.txt
          * |
@@ -336,7 +337,7 @@ fn test_rename_exchange(mount_dir: &Path) -> anyhow::Result<()> {
 
         fcntl::renameat2(Some(base_fd), &file_a, Some(base_fd), &dir, rename_flag)?;
 
-        /* Tree: 
+        /* Tree:
          * exchange
          * |- dir (former a.txt)
          * |
@@ -352,7 +353,7 @@ fn test_rename_exchange(mount_dir: &Path) -> anyhow::Result<()> {
         assert_eq!(stat_old_dir, stat_new_a);
         assert_ne!(stat_old_base, stat_new_base); // Timestamp of the parent is changed.
 
-        let file_b = file_a.join("b.txt");  // file_a is a dir now
+        let file_b = file_a.join("b.txt"); // file_a is a dir now
         let content_a = fs::read_to_string(&dir)?;
         let content_b = fs::read_to_string(file_b)?;
 
@@ -661,6 +662,7 @@ async fn _run_test(mount_dir_str: &str, is_s3: bool) -> anyhow::Result<()> {
     test_bind_mount(mount_dir).context("test_bind_mount() failed")?;
     test_deferred_deletion(mount_dir).context("test_deferred_deletion() failed")?;
     test_rename_file_replace(mount_dir).context("test_rename_file_replace() failed")?;
+    #[cfg(feature = "abi-7-23")]
     test_rename_exchange(mount_dir).context("test_rename_exchange() failed")?;
     test_rename_file(mount_dir).context("test_rename_file() failed")?;
     test_rename_dir(mount_dir).context("test_rename_dir() failed")?;
