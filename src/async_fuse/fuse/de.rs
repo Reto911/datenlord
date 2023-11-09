@@ -161,6 +161,7 @@ impl<'b> Deserializer<'b> {
     }
 
     /// Fetch remaining bytes and transmute to a slice of target instances
+    #[allow(dead_code)]
     pub fn fetch_all_as_slice<T: FuseAbiData + Sized>(
         &mut self,
     ) -> Result<&'b [T], DeserializeError> {

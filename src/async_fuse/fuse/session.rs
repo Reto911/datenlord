@@ -465,6 +465,11 @@ async fn dispatch<'a>(
             fs.getattr(req, reply).await
         }
         Operation::SetAttr { arg } => {
+            #[cfg(feature = "abi-7-9")]
+            use super::protocol::{FATTR_ATIME_NOW, FATTR_MTIME_NOW};
+            #[cfg(feature = "abi-7-9")]
+            use std::time::SystemTime;
+
             let mode = match arg.valid & FATTR_MODE {
                 0 => None,
                 _ => Some(arg.mode),
@@ -493,16 +498,18 @@ async fn dispatch<'a>(
                 0 => None,
                 _ => Some(arg.fh),
             };
-            // #[cfg(feature = "abi-7-9")]
-            // let a_time = match arg.valid & FATTR_ATIME_NOW {
-            //     0 => None,
-            //     _ => Some(SystemTime::now()),
-            // };
-            // #[cfg(feature = "abi-7-9")]
-            // let m_time = match arg.valid & FATTR_MTIME_NOW {
-            //     0 => None,
-            //     _ => Some(SystemTime::now()),
-            // };
+
+            #[cfg(feature = "abi-7-9")]
+            let a_time = match arg.valid & FATTR_ATIME_NOW {
+                0 => a_time,
+                _ => Some(SystemTime::now()),
+            };
+            #[cfg(feature = "abi-7-9")]
+            let m_time = match arg.valid & FATTR_MTIME_NOW {
+                0 => m_time,
+                _ => Some(SystemTime::now()),
+            };
+
             #[cfg(feature = "abi-7-9")]
             let lock_owner = match arg.valid & FATTR_LOCKOWNER {
                 0 => None,
@@ -722,22 +729,22 @@ async fn dispatch<'a>(
             fs.bmap(req, arg.blocksize, arg.block, reply).await
         }
 
-        // #[cfg(feature = "abi-7-11")]
+        #[cfg(feature = "abi-7-11")]
         Operation::IoCtl { arg, data } => {
             error!("IoCtl not implemented, arg={:?}, data={:?}", arg, data);
             not_implement_helper(req, fd).await
         }
-        // #[cfg(feature = "abi-7-11")]
+        #[cfg(feature = "abi-7-11")]
         Operation::Poll { arg } => {
             error!("Poll not implemented, arg={:?}", arg);
             not_implement_helper(req, fd).await
         }
-        // #[cfg(feature = "abi-7-15")]
+        #[cfg(feature = "abi-7-15")]
         Operation::NotifyReply { data } => {
             error!("NotifyReply not implemented, data={:?}", data);
             not_implement_helper(req, fd).await
         }
-        // #[cfg(feature = "abi-7-16")]
+        #[cfg(feature = "abi-7-16")]
         Operation::BatchForget { arg, nodes } => {
             error!(
                 "BatchForget not implemented, arg={:?}, nodes={:?}",
@@ -745,12 +752,12 @@ async fn dispatch<'a>(
             );
             not_implement_helper(req, fd).await
         }
-        // #[cfg(feature = "abi-7-19")]
+        #[cfg(feature = "abi-7-19")]
         Operation::FAllocate { arg } => {
             error!("FAllocate not implemented, arg={:?}", arg);
             not_implement_helper(req, fd).await
         }
-        // #[cfg(feature = "abi-7-21")]
+        #[cfg(feature = "abi-7-21")]
         Operation::ReadDirPlus { arg } => {
             error!("ReadDirPlus not implemented, arg={:?}", arg);
             not_implement_helper(req, fd).await
