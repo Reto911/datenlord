@@ -136,3 +136,41 @@ where
             .await;
     }
 }
+
+/// A "blackhole" that does not store any data.
+#[derive(Debug)]
+pub struct BlackHole;
+
+#[async_trait]
+impl Storage for BlackHole {
+    async fn load_from_self(&self, _: INum, _: usize) -> Option<Block> {
+        None
+    }
+
+    async fn load_from_backend(&self, _: INum, _: usize) -> Option<Block> {
+        None
+    }
+
+    async fn cache_block_from_backend(
+        &self,
+        _: INum,
+        _: usize,
+        _: Block,
+    ) -> Option<(BlockCoordinate, Block)> {
+        None
+    }
+
+    async fn on_evict(&self, _: INum, _: usize, _: Block) {}
+
+    async fn store(&self, _: INum, _: usize, _: IoBlock) {}
+
+    async fn remove(&self, _: INum) {}
+
+    async fn invalidate(&self, _: INum) {}
+
+    async fn flush(&self, _: INum) {}
+
+    async fn flush_all(&self) {}
+
+    async fn truncate(&self, _: INum, _: usize, _: usize, _: usize) {}
+}
