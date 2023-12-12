@@ -20,7 +20,6 @@ use tracing::{debug, info, instrument, warn};
 
 use super::cache::{GlobalCache, IoMemBlock};
 use super::dir::DirEntry;
-use super::dist::client as dist_client;
 use super::dist::server::CacheServer;
 use super::fs_util::{self, FileAttr, NEED_CHECK_PERM};
 use super::id_alloc_used::INumAllocator;
@@ -855,7 +854,6 @@ impl<S: S3BackEnd + Sync + Send + 'static> MetaData for S3MetaData<S> {
         data: Vec<u8>,
         flags: u32,
     ) -> DatenLordResult<usize> {
-        let data_len = data.len();
         let (result, _) = {
             let mut inode = self
                 .get_node_from_kv_engine(ino)
@@ -879,7 +877,6 @@ impl<S: S3BackEnd + Sync + Send + 'static> MetaData for S3MetaData<S> {
             self.set_node_to_kv_engine(ino, inode).await?;
             (res, parent_ino)
         };
-        self.invalidate_remote(ino, offset, data_len).await?;
         result
     }
 }
@@ -1549,32 +1546,6 @@ impl<S: S3BackEnd + Send + Sync + 'static> S3MetaData<S> {
         let result = self.inum_allocator.alloc_inum_for_fnode().await;
         debug!("alloc_inum_for_fnode() result={result:?}");
         result
-    }
-
-    /// Invalidate cache from other nodes
-    async fn invalidate_remote(
-        &self,
-        full_ino: INum,
-        offset: i64,
-        len: usize,
-    ) -> DatenLordResult<()> {
-        dist_client::invalidate(
-            &self.kv_engine,
-            &self.node_id,
-            &self.volume_info,
-            full_ino,
-            offset
-                .overflow_div(self.data_cache.get_align().cast())
-                .cast(),
-            offset
-                .overflow_add(len.cast())
-                .overflow_sub(1)
-                .overflow_div(self.data_cache.get_align().cast())
-                .cast(),
-        )
-        .await
-        .map_err(DatenLordError::from)
-        .add_context("failed to invlidate others' cache")
     }
 
     /// If sticky bit is set, only the owner of the directory, the owner of the
