@@ -5,7 +5,7 @@ use std::os::unix::io::RawFd;
 use std::path::Path;
 use std::sync::atomic::AtomicU32;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use anyhow::Context;
 use async_trait::async_trait;
@@ -17,6 +17,7 @@ use nix::sys::stat::SFlag;
 use parking_lot::RwLock as SyncRwLock; // conflict with tokio RwLock
 use tokio::sync::Mutex;
 use tracing::{debug, info, instrument, warn};
+use lockfree_cuckoohash::LockFreeCuckooHash as HashMap;
 
 use super::cache::{GlobalCache, IoMemBlock, Storage, StorageManager};
 use super::dir::DirEntry;
@@ -82,6 +83,10 @@ pub struct S3MetaData<S: S3BackEnd + Send + Sync + 'static, St: Storage + Send +
     pub(crate) kv_engine: Arc<KVEngineType>,
     /// Inum allocator
     inum_allocator: INumAllocator<KVEngineType>,
+    /// Mtime cache in local
+    local_mtime: HashMap<INum, SystemTime>,
+    /// Size cache in local
+    local_size: HashMap<INum, u64>,
 }
 
 /// Parse S3 info
@@ -459,6 +464,8 @@ impl<S: S3BackEnd + Sync + Send + 'static, St: Storage + Send + Sync + 'static> 
             inum_allocator: INumAllocator::new(Arc::clone(&kv_engine)),
             kv_engine,
             storage: Arc::new(storage),
+            local_mtime: HashMap::new(),
+            local_size: HashMap::new(),
         });
 
         let server = CacheServer::new(ip.to_owned(), port.to_owned(), data_cache);
