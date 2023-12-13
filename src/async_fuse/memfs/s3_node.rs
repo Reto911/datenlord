@@ -10,7 +10,6 @@ use std::time::SystemTime;
 use async_trait::async_trait;
 use clippy_utilities::{Cast, OverflowArithmetic};
 use futures::future::{BoxFuture, FutureExt};
-use nix::errno::Errno;
 use nix::fcntl::OFlag;
 use nix::sys::stat::{Mode, SFlag};
 use nix::unistd;
@@ -20,7 +19,7 @@ use tracing::debug;
 use super::cache::{GlobalCache, IoMemBlock, Storage};
 use super::dir::DirEntry;
 use super::dist::client as dist_client;
-use super::fs_util::{self, FileAttr, NEED_CHECK_PERM};
+use super::fs_util::{self, FileAttr};
 use super::kv_engine::KVEngineType;
 use super::metadata::error;
 use super::node::Node;
@@ -29,11 +28,9 @@ use super::s3_wrapper::S3BackEnd;
 use super::serial::{
     dir_entry_to_serial, file_attr_to_serial, serial_to_file_attr, SerialNode, SerialNodeData,
 };
-use super::SetAttrParam;
 use crate::async_fuse::fuse::fuse_reply::{AsIoVec, StatFsParam};
 use crate::async_fuse::fuse::protocol::{INum, FUSE_ROOT_ID};
 use crate::async_fuse::metrics;
-use crate::async_fuse::util::build_error_result_from_errno;
 use crate::common::error::{DatenLordError, DatenLordResult};
 
 /// S3's available fd count
@@ -247,19 +244,6 @@ impl<S: S3BackEnd + Send + Sync + 'static> S3Node<S> {
         }
     }
 
-    /// Set node attribute
-    pub(crate) fn _set_attr(&mut self, new_attr: FileAttr, _broadcast: bool) -> FileAttr {
-        let old_attr = self.get_attr();
-        match self.data {
-            S3NodeData::Directory(..) => debug_assert_eq!(new_attr.kind, SFlag::S_IFDIR),
-            S3NodeData::RegFile(..) => debug_assert_eq!(new_attr.kind, SFlag::S_IFREG),
-            S3NodeData::SymLink(..) => debug_assert_eq!(new_attr.kind, SFlag::S_IFLNK),
-        }
-
-        self.attr.write().clone_from(&new_attr);
-        old_attr
-    }
-
     #[allow(clippy::unused_self)]
     /// Get new fd
     fn new_fd(&self) -> u32 {
@@ -417,7 +401,15 @@ impl<S: S3BackEnd + Sync + Send + 'static> Node for S3Node<S> {
 
     /// Set node attribute
     fn set_attr(&mut self, new_attr: FileAttr) -> FileAttr {
-        self._set_attr(new_attr, true)
+        let old_attr = self.get_attr();
+        match self.data {
+            S3NodeData::Directory(..) => debug_assert_eq!(new_attr.kind, SFlag::S_IFDIR),
+            S3NodeData::RegFile(..) => debug_assert_eq!(new_attr.kind, SFlag::S_IFREG),
+            S3NodeData::SymLink(..) => debug_assert_eq!(new_attr.kind, SFlag::S_IFLNK),
+        }
+
+        self.attr.write().clone_from(&new_attr);
+        old_attr
     }
 
     /// Get node attribute and increase lookup count
@@ -985,119 +977,5 @@ impl<S: S3BackEnd + Sync + Send + 'static> Node for S3Node<S> {
 
     async fn closedir(&self) {
         self.dec_open_count();
-    }
-
-    async fn setattr_precheck(
-        &self,
-        param: SetAttrParam,
-        user_id: u32,
-        group_id: u32,
-    ) -> DatenLordResult<(bool, FileAttr)> {
-        let mut dirty_attr = self.get_attr();
-        let cur_attr = self.get_attr();
-
-        let st_now = SystemTime::now();
-        let mut attr_changed = false;
-
-        let check_permission = || -> DatenLordResult<()> {
-            if NEED_CHECK_PERM {
-                //  owner is root check the user_id
-                if cur_attr.uid == 0 && user_id != 0 {
-                    return build_error_result_from_errno(
-                        Errno::EPERM,
-                        "setattr() cannot change atime".to_owned(),
-                    );
-                }
-                self.attr.read().check_perm(user_id, group_id, 2)?;
-                if user_id != cur_attr.uid {
-                    return build_error_result_from_errno(
-                        Errno::EACCES,
-                        "setattr() cannot change atime".to_owned(),
-                    );
-                }
-                Ok(())
-            } else {
-                // We don't need to check permission
-                Ok(())
-            }
-        };
-
-        if let Some(gid) = param.g_id {
-            if user_id != 0 && cur_attr.uid != user_id {
-                return build_error_result_from_errno(
-                    Errno::EPERM,
-                    "setattr() cannot change gid".to_owned(),
-                );
-            }
-
-            if cur_attr.gid != gid {
-                dirty_attr.gid = gid;
-                attr_changed = true;
-            }
-        }
-
-        if let Some(uid) = param.u_id {
-            if cur_attr.uid != uid {
-                if user_id != 0 {
-                    return build_error_result_from_errno(
-                        Errno::EPERM,
-                        "setattr() cannot change uid".to_owned(),
-                    );
-                }
-                dirty_attr.uid = uid;
-                attr_changed = true;
-            }
-        }
-
-        if let Some(mode) = param.mode {
-            let mode: u16 = mode.cast();
-            if mode != cur_attr.perm {
-                if user_id != 0 && user_id != cur_attr.uid {
-                    return build_error_result_from_errno(
-                        Errno::EPERM,
-                        "setattr() cannot change mode".to_owned(),
-                    );
-                }
-                dirty_attr.perm = mode;
-                attr_changed = true;
-            }
-        }
-
-        if let Some(atime) = param.a_time {
-            check_permission()?;
-            if atime != cur_attr.atime {
-                dirty_attr.atime = atime;
-                attr_changed = true;
-            }
-        }
-
-        if let Some(mtime) = param.m_time {
-            check_permission()?;
-            if mtime != cur_attr.mtime {
-                dirty_attr.mtime = mtime;
-                attr_changed = true;
-            }
-        }
-
-        #[cfg(feature = "abi-7-23")]
-        if let Some(ctime) = param.c_time {
-            check_permission()?;
-            if ctime != cur_attr.ctime {
-                dirty_attr.ctime = ctime;
-                attr_changed = true;
-            }
-        }
-
-        if let Some(file_size) = param.size {
-            dirty_attr.size = file_size;
-            dirty_attr.mtime = st_now;
-            attr_changed = true;
-        }
-
-        if attr_changed {
-            dirty_attr.ctime = st_now;
-        }
-
-        Ok((attr_changed, dirty_attr))
     }
 }

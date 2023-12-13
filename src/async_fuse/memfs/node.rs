@@ -13,7 +13,6 @@ use parking_lot::RwLock;
 use super::cache::{GlobalCache, IoMemBlock};
 use super::dir::DirEntry;
 use super::fs_util::FileAttr;
-use super::SetAttrParam;
 use crate::async_fuse::fuse::fuse_reply::StatFsParam;
 use crate::async_fuse::fuse::protocol::INum;
 use crate::common::error::DatenLordResult;
@@ -132,13 +131,6 @@ pub trait Node: Sized {
     async fn close(&mut self);
     /// Close dir
     async fn closedir(&self);
-    /// Precheck before set attr
-    async fn setattr_precheck(
-        &self,
-        param: SetAttrParam,
-        uid: u32,
-        gid: u32,
-    ) -> DatenLordResult<(bool, FileAttr)>;
     /// Mark as deferred deletion
     fn mark_deferred_deletion(&self);
     /// If node is marked as deferred deletion

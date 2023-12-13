@@ -350,26 +350,13 @@ impl<S: S3BackEnd + Sync + Send + 'static, St: Storage + Send + Sync + 'static> 
             .ok_or_else(|| build_inconsistent_fs!(ino))?;
 
         let inode = inode_wrap;
-        let mut attr = inode.get_attr();
+        let attr = self.apply_local_mtime_and_size(inode.get_attr());
+
         debug!(
             "getattr() cache hit when searching the attribute of ino={} and name={:?}",
             ino,
             inode.get_name(),
         );
-
-        // fill the local cache of `mtime` and `size` to `attr`
-        {
-            let (local_mtime, local_size) = self.get_local_mtime_and_size(ino);
-
-            if let Some(mtime) = local_mtime {
-                attr.mtime = mtime;
-                attr.ctime = mtime.max(attr.ctime);
-            }
-
-            if let Some(size) = local_size {
-                attr.size = size;
-            }
-        }
 
         let ttl = Duration::new(MY_TTL_SEC, 0);
         let fuse_attr = fs_util::convert_to_fuse_attr(attr);
@@ -418,26 +405,66 @@ impl<S: S3BackEnd + Sync + Send + 'static, St: Storage + Send + Sync + 'static> 
             .await?
             .ok_or_else(|| build_inconsistent_fs!(ino))?;
 
-        match inode
-            .setattr_precheck(param, context.user_id, context.group_id)
-            .await
-        {
-            Ok((attr_changed, file_attr)) => {
-                if attr_changed {
-                    inode.set_attr(file_attr);
-                    debug!(
-                        "setattr() successfully set the attribute of ino={} and name={:?}, the set attr={:?}",
-                        ino, inode.get_name(), file_attr,
-                    );
-                } else {
-                    warn!(
-                        "setattr() did not change any attribute of ino={} and name={:?}",
-                        ino,
-                        inode.get_name(),
-                    );
+        let origin_attr = inode.get_attr();
+        let applied_attr = if SFlag::S_IFREG == origin_attr.kind {
+            self.apply_local_mtime_and_size(origin_attr)
+        } else {
+            origin_attr
+        };
+
+        match applied_attr.setattr_precheck(&param, context.user_id, context.group_id) {
+            Ok(Some(mut dirty_attr)) => {
+                // This is to be inserted in KV, whose `mtime` and `size` should be reset to origin,
+                // because changes of this field are invisible to other nodes until flush.
+                let mut dirty_attr_for_kv = dirty_attr;
+
+                // There are `mtime` and `size` caches for regular files. Check the change of these fields, and
+                // set them to the cache.
+                if SFlag::S_IFREG == applied_attr.kind {
+                    if dirty_attr.mtime != applied_attr.mtime {
+                        self.local_mtime.insert(ino, dirty_attr.mtime);
+                    }
+                    // Reset `mtime` to origin, because change of this field is invisible to other nodes until flush.
+                    dirty_attr_for_kv.mtime = origin_attr.mtime;
+
+                    if dirty_attr.size != applied_attr.size {
+                        self.local_size.insert(ino, dirty_attr.size);
+                    }
+                    dirty_attr_for_kv.size = origin_attr.size;
+
+                    // The file also needs to be truncated, if the new size is shorter.
+                    if dirty_attr.size < applied_attr.size {
+                        let new_mtime = self
+                            .storage
+                            .truncate(
+                                ino,
+                                applied_attr.size.cast(),
+                                dirty_attr.size.cast(),
+                                applied_attr.mtime,
+                            )
+                            .await;
+                        self.local_mtime.insert(ino, new_mtime);
+                        dirty_attr.mtime = new_mtime;
+                    }
                 }
+
+                inode.set_attr(dirty_attr_for_kv);
+                debug!(
+                    "setattr() successfully set the attribute of ino={} and name={:?}, the set attr={:?}",
+                    ino, inode.get_name(), dirty_attr,
+                );
+
                 self.set_node_to_kv_engine(ino, inode).await?;
-                Ok((ttl, fs_util::convert_to_fuse_attr(file_attr)))
+                // The attr with new `size` and `mtime` should be replied.
+                Ok((ttl, fs_util::convert_to_fuse_attr(dirty_attr)))
+            }
+            Ok(None) => {
+                warn!(
+                    "setattr() did not change any attribute of ino={} and name={:?}",
+                    ino,
+                    inode.get_name(),
+                );
+                Ok((ttl, fs_util::convert_to_fuse_attr(origin_attr)))
             }
             Err(e) => {
                 debug!(
@@ -750,21 +777,8 @@ impl<S: S3BackEnd + Sync + Send + 'static, St: Storage + Send + Sync + 'static> 
             .get_node_from_kv_engine(child_ino)
             .await?
             .ok_or_else(|| build_inconsistent_fs!(child_ino))?;
-        let mut attr = child_node.lookup_attr();
 
-        // fill the local cache of `mtime` and `size` to `attr`
-        {
-            let (local_mtime, local_size) = self.get_local_mtime_and_size(child_ino);
-
-            if let Some(mtime) = local_mtime {
-                attr.mtime = mtime;
-                attr.ctime = mtime.max(attr.ctime);
-            }
-
-            if let Some(size) = local_size {
-                attr.size = size;
-            }
-        }
+        let attr = self.apply_local_mtime_and_size(child_node.lookup_attr());
 
         debug!(
             "ino={} lookup_count={} lookup_attr={:?}",
@@ -1057,6 +1071,24 @@ impl<S: S3BackEnd + Send + Sync + 'static, St: Storage + Send + Sync + 'static> 
             self.local_mtime.get(&ino, &guard).copied(),
             self.local_size.get(&ino, &guard).copied(),
         )
+    }
+
+    /// Apply the local `mtime` and `size` to `attr`.
+    fn apply_local_mtime_and_size(&self, mut attr: FileAttr) -> FileAttr {
+        let ino = attr.ino;
+
+        let (local_mtime, local_size) = self.get_local_mtime_and_size(ino);
+
+        if let Some(mtime) = local_mtime {
+            attr.mtime = mtime;
+            attr.ctime = mtime.max(attr.ctime);
+        }
+
+        if let Some(size) = local_size {
+            attr.size = size;
+        }
+
+        attr
     }
 
     /// Helper function to pre-check if node can be deferred deleted.
