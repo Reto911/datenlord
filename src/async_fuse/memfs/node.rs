@@ -129,9 +129,9 @@ pub trait Node: Sized {
         write_to_disk: bool,
     ) -> DatenLordResult<usize>;
     /// Close file
-    async fn close(&mut self, ino: INum, fh: u64, flush: bool);
+    async fn close(&mut self);
     /// Close dir
-    async fn closedir(&self, ino: INum, fh: u64);
+    async fn closedir(&self);
     /// Precheck before set attr
     async fn setattr_precheck(
         &self,

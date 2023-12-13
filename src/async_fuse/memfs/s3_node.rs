@@ -7,7 +7,6 @@ use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::SystemTime;
 
-use anyhow::anyhow;
 use async_trait::async_trait;
 use clippy_utilities::{Cast, OverflowArithmetic};
 use futures::future::{BoxFuture, FutureExt};
@@ -23,6 +22,7 @@ use super::dir::DirEntry;
 use super::dist::client as dist_client;
 use super::fs_util::{self, FileAttr, NEED_CHECK_PERM};
 use super::kv_engine::KVEngineType;
+use super::metadata::error;
 use super::node::Node;
 use super::s3_metadata::S3MetaData;
 use super::s3_wrapper::S3BackEnd;
@@ -341,53 +341,6 @@ impl<S: S3BackEnd + Send + Sync + 'static> S3Node<S> {
                 &meta.volume_info,
             );
             Ok(root_node)
-        }
-    }
-
-    /// flush all data of a node
-    async fn flush_all_data(&mut self) -> DatenLordResult<()> {
-        if self.is_deferred_deletion() {
-            return Ok(());
-        }
-        let data_cache = match self.data {
-            S3NodeData::RegFile(ref data_cache) => Arc::<GlobalCache>::clone(data_cache),
-            // Do nothing for Directory.
-            // TODO: Sync dir data to S3 storage
-            S3NodeData::Directory(..) => return Ok(()),
-            S3NodeData::SymLink(..) => panic!("forbidden to flush data for link"),
-        };
-
-        let size = self.attr.read().size;
-        if self.need_load_file_data(0, size.cast()).await {
-            let load_res = self.load_data(0, size.cast()).await;
-            if let Err(e) = load_res {
-                debug!(
-                    "failed to load data for file {} while flushing data, the error is: {:?}",
-                    self.get_name(),
-                    e,
-                );
-                return Err(e);
-            }
-        }
-
-        let put_result = self
-            .s3_backend
-            .put_data_vec(
-                self.get_ino(),
-                data_cache.get_file_cache(self.get_ino(), 0, size.cast()),
-            )
-            .await;
-
-        match put_result {
-            Ok(()) => Ok(()),
-            Err(e) => {
-                debug!(
-                    "flush_all_data() failed to flush data for file {}, the error is: {}",
-                    self.get_name(),
-                    e,
-                );
-                Err(DatenLordError::from(anyhow!(e)))
-            }
         }
     }
 
@@ -900,29 +853,26 @@ impl<S: S3BackEnd + Sync + Send + 'static> Node for S3Node<S> {
     /// Unlink directory entry from both cache and disk
     async fn unlink_entry(&mut self, child_name: &str) -> DatenLordResult<DirEntry> {
         let dir_data = self.get_dir_data_mut();
-        let removed_entry = dir_data.remove(child_name).unwrap_or_else(|| {
-            panic!(
-                "unlink_entry() found fs is inconsistent, the entry of name={:?} \
-                    is not in directory of name={:?} and ino={}",
-                child_name,
-                self.get_name(),
-                self.get_ino(),
-            );
-        });
+        let removed_entry = dir_data.remove(child_name).ok_or_else(|| {
+            error::build_inconsistent_fs_with_context(
+                "unlink_entry",
+                format!(
+                    "the entry of name={:?} is not in directory of name={:?} and ino={}",
+                    child_name,
+                    self.get_name(),
+                    self.get_ino()
+                ),
+            )
+        })?;
 
-        // delete from disk and close the handler
-        match removed_entry.entry_type() {
-            SFlag::S_IFDIR | SFlag::S_IFREG | SFlag::S_IFLNK => {
-                let ino = removed_entry.ino();
-                if let Err(e) = self.s3_backend.delete_data(ino).await {
-                    panic!("failed to delete data of {ino} from s3 backend, error is {e:?}");
-                }
-            }
-            _ => panic!(
-                "unlink_entry() found unsupported entry type={:?}",
-                removed_entry.entry_type()
-            ),
+        let entry_type = removed_entry.entry_type();
+        if !matches!(entry_type, SFlag::S_IFDIR | SFlag::S_IFREG | SFlag::S_IFLNK) {
+            return Err(error::build_unsupported_inode_type(
+                entry_type,
+                "unlink_entry".into(),
+            ));
         }
+
         self.update_mtime_ctime_to_now();
         Ok(removed_entry)
     }
@@ -1028,15 +978,12 @@ impl<S: S3BackEnd + Sync + Send + 'static> Node for S3Node<S> {
         Ok(written_size)
     }
 
-    async fn close(&mut self, ino: INum, _fh: u64, _flush: bool) {
-        if let Err(e) = self.flush_all_data().await {
-            panic!("failed to flush all data of {ino}, error is {e:?}");
-        }
+    async fn close(&mut self) {
+        debug!("close(): about to close ino={}", self.get_ino());
         self.dec_open_count();
     }
 
-    /// TODO: push dir data to s3
-    async fn closedir(&self, _ino: INum, _fh: u64) {
+    async fn closedir(&self) {
         self.dec_open_count();
     }
 

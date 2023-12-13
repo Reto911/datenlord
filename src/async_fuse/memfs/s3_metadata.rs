@@ -57,7 +57,6 @@ const MY_TTL_SEC: u64 = 3600; // TODO: should be a long value, say 1 hour
 const MY_GENERATION: u64 = 1; // TODO: find a proper way to set generation
 /// S3 information string delimiter
 const S3_INFO_DELIMITER: char = ';';
-#[allow(dead_code)]
 /// The limit of transaction commit retrying times.
 const TXN_RETRY_LIMIT: u32 = 5;
 
@@ -117,7 +116,12 @@ impl<S: S3BackEnd + Sync + Send + 'static, St: Storage + Send + Sync + 'static> 
             .get_node_from_kv_engine(ino)
             .await?
             .ok_or_else(|| build_inconsistent_fs!(ino))?;
-        inode.close(ino, fh, flush).await;
+
+        if flush {
+            self.flush(ino, fh).await?;
+        }
+
+        inode.close().await;
         debug!(
                 "release() successfully closed the file handler={} of ino={} and name={:?} open_count={}",
                 fh,
@@ -259,13 +263,13 @@ impl<S: S3BackEnd + Sync + Send + 'static, St: Storage + Send + Sync + 'static> 
     }
 
     #[instrument(skip(self))]
-    async fn releasedir(&self, ino: u64, fh: u64) -> DatenLordResult<()> {
+    async fn releasedir(&self, ino: u64, _fh: u64) -> DatenLordResult<()> {
         {
             let node = self
                 .get_node_from_kv_engine(ino)
                 .await?
                 .ok_or_else(|| build_inconsistent_fs!(ino))?;
-            node.closedir(ino, fh).await;
+            node.closedir().await;
             self.set_node_to_kv_engine(ino, node).await?;
         };
         self.try_delete_node(ino).await?;
@@ -374,7 +378,6 @@ impl<S: S3BackEnd + Sync + Send + 'static, St: Storage + Send + Sync + 'static> 
 
     #[instrument(skip(self))]
     async fn forget(&self, ino: u64, nlookup: u64) -> DatenLordResult<()> {
-        let current_count: i64;
         {
             let inode = self
                 .get_node_from_kv_engine(ino)
@@ -382,7 +385,7 @@ impl<S: S3BackEnd + Sync + Send + 'static, St: Storage + Send + Sync + 'static> 
                 .ok_or_else(|| build_inconsistent_fs!(ino))?;
 
             let previous_count = inode.dec_lookup_count_by(nlookup);
-            current_count = inode.get_lookup_count();
+            let current_count = inode.get_lookup_count();
             debug_assert!(current_count >= 0);
             debug_assert_eq!(
                 previous_count.overflow_sub(current_count),
@@ -575,7 +578,9 @@ impl<S: S3BackEnd + Sync + Send + 'static, St: Storage + Send + Sync + 'static> 
             );
             self.remove_node_from_kv_engine(ino).await?;
             if let SFlag::S_IFREG = node.get_type() {
-                self.data_cache.remove_file_cache(node.get_ino()).await;
+                self.storage.remove(ino).await;
+                self.local_mtime.remove(&ino);
+                self.local_size.remove(&ino);
             }
             Ok(true)
         } else {
@@ -1140,7 +1145,14 @@ impl<S: S3BackEnd + Send + Sync + 'static, St: Storage + Send + Sync + 'static> 
                 }
             }
         } else {
-            // immediate deletion
+            debug_assert_eq!(inode.get_ino(), ino);
+            if let SFlag::S_IFREG = inode.get_type() {
+                // Delete from cache and the backend
+                self.storage.remove(ino).await;
+                self.local_mtime.remove(&ino);
+                self.local_size.remove(&ino);
+            }
+            // Delete from metadata
             self.remove_node_from_kv_engine(ino).await?;
         }
         self.set_node_to_kv_engine(parent_ino, parent_node).await?;
@@ -1409,8 +1421,8 @@ impl<S: S3BackEnd + Send + Sync + 'static, St: Storage + Send + Sync + 'static> 
         Ok((old_parent_fd, old_entry_ino, new_parent_fd, new_entry_ino))
     }
 
-    /// Rename in cache helper
-    async fn rename_in_cache_helper(
+    /// Rename in metadata helper
+    async fn rename_in_metadata_helper(
         &self,
         old_parent: INum,
         old_name: &str,
@@ -1514,7 +1526,7 @@ impl<S: S3BackEnd + Send + Sync + 'static, St: Storage + Send + Sync + 'static> 
         };
 
         let rename_replace_res = self
-            .rename_in_cache_helper(old_parent, old_name, new_parent, new_name)
+            .rename_in_metadata_helper(old_parent, old_name, new_parent, new_name)
             .await?;
         debug_assert!(
             rename_replace_res.is_none(),
