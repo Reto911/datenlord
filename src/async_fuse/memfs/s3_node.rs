@@ -281,36 +281,6 @@ impl<S: S3BackEnd + Send + Sync + 'static> S3Node<S> {
         self.lookup_count.fetch_add(1, Ordering::AcqRel)
     }
 
-    /// Helper function to check need to load node data or not
-    #[allow(dead_code)]
-    fn need_load_node_data_helper(&self) -> bool {
-        if !self.is_node_data_empty() {
-            debug!(
-                "need_load_node_data_helper() found node data of name={:?} \
-                    and ino={} is in cache, no need to load",
-                self.get_name(),
-                self.get_ino(),
-            );
-            false
-        } else if self.get_attr().size > 0 {
-            debug!(
-                "need_load_node_data_helper() found node size of name={:?} \
-                    and ino={} is non-zero, need to load",
-                self.get_name(),
-                self.get_ino(),
-            );
-            true
-        } else {
-            debug!(
-                "need_load_node_data_helper() found node size of name={:?} \
-                    and ino={} is zero, no need to load",
-                self.get_name(),
-                self.get_ino(),
-            );
-            false
-        }
-    }
-
     /// Get directory data
     pub(crate) fn get_dir_data(&self) -> &BTreeMap<String, DirEntry> {
         match self.data {
@@ -535,12 +505,6 @@ impl<S: S3BackEnd + Sync + Send + 'static> Node for S3Node<S> {
     /// If node is marked as deferred deletion
     fn is_deferred_deletion(&self) -> bool {
         self.deferred_deletion.load(Ordering::SeqCst)
-    }
-
-    async fn flush(&mut self, ino: INum, _fh: u64) {
-        if let Err(e) = self.flush_all_data().await {
-            panic!("failed to flash all data of {ino:?}, error is {e:?}");
-        }
     }
 
     /// Duplicate fd

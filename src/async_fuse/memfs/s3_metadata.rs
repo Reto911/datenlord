@@ -11,15 +11,15 @@ use anyhow::Context;
 use async_trait::async_trait;
 use clippy_utilities::{Cast, OverflowArithmetic};
 use itertools::Itertools;
+use lockfree_cuckoohash::{pin, LockFreeCuckooHash as HashMap};
 use nix::errno::Errno;
 use nix::fcntl::OFlag;
 use nix::sys::stat::SFlag;
 use parking_lot::RwLock as SyncRwLock; // conflict with tokio RwLock
 use tokio::sync::Mutex;
 use tracing::{debug, info, instrument, warn};
-use lockfree_cuckoohash::LockFreeCuckooHash as HashMap;
 
-use super::cache::{GlobalCache, IoMemBlock, Storage, StorageManager};
+use super::cache::{GlobalCache, IoBlock, Storage, StorageManager};
 use super::dir::DirEntry;
 use super::dist::server::CacheServer;
 use super::fs_util::{self, FileAttr, NEED_CHECK_PERM};
@@ -221,12 +221,40 @@ impl<S: S3BackEnd + Sync + Send + 'static, St: Storage + Send + Sync + 'static> 
     }
 
     #[instrument(skip(self))]
-    async fn flush(&self, ino: u64, fh: u64) -> DatenLordResult<()> {
+    async fn flush(&self, ino: u64, _fh: u64) -> DatenLordResult<()> {
         let mut node = self
             .get_node_from_kv_engine(ino)
             .await?
             .ok_or_else(|| build_inconsistent_fs!(ino))?;
-        node.flush(ino, fh).await;
+
+        if node.is_deferred_deletion() {
+            return Ok(());
+        }
+
+        // Flush the storage cache
+        self.storage.flush(ino).await;
+
+        // Flush metadata cache, there are `mtime` and `size` now
+        {
+            let guard = pin();
+            let mut file_attr = node.get_attr();
+
+            if let Some(&mtime) = self.local_mtime.remove_with_guard(&ino, &guard) {
+                file_attr.mtime = mtime;
+
+                // `ctime` may be greater than `mtime`, use the greater one
+                file_attr.ctime = mtime.max(file_attr.ctime);
+            }
+
+            if let Some(&size) = self.local_size.remove_with_guard(&ino, &guard) {
+                file_attr.size = size;
+            }
+
+            node.set_attr(file_attr);
+        }
+
+        self.set_node_to_kv_engine(ino, node).await?;
+
         Ok(())
     }
 
@@ -251,39 +279,41 @@ impl<S: S3BackEnd + Sync + Send + 'static, St: Storage + Send + Sync + 'static> 
         _fh: u64,
         offset: i64,
         size: u32,
-    ) -> DatenLordResult<Vec<IoMemBlock>> {
+    ) -> DatenLordResult<Vec<IoBlock>> {
         debug!(
             "read_helper() called, ino={}, offset={}, size={}",
             ino, offset, size
         );
-        let mut inode = self
+        let inode = self
             .get_node_from_kv_engine(ino)
             .await?
             .ok_or_else(|| build_inconsistent_fs!(ino))?;
 
-        let size: u64 =
-            if offset.cast::<u64>().overflow_add(size.cast::<u64>()) > inode.get_attr().size {
-                inode.get_attr().size.overflow_sub(offset.cast::<u64>())
-            } else {
-                size.cast()
-            };
+        let (mtime, file_size) = {
+            let (local_mtime, local_size) = self.get_local_mtime_and_size(ino);
+            let file_attr = inode.get_attr();
+            (
+                local_mtime.unwrap_or(file_attr.mtime),
+                local_size.unwrap_or(file_attr.size),
+            )
+        };
 
-        // let node_type = node.get_type();
-        // let file_data = if SFlag::S_IFREG == node_type {
-        if inode.need_load_file_data(offset.cast(), size.cast()).await {
-            debug!("read() need to load file data of ino={}", ino,);
-            let load_res = inode.load_data(offset.cast(), size.cast()).await;
-            if let Err(e) = load_res {
-                debug!(
-                    "read() failed to load file data of ino={} and name={:?}, the error is: {:?}",
-                    ino,
-                    inode.get_name(),
-                    e,
-                );
-                return Err(e);
-            }
+        if offset.cast::<u64>() >= file_size {
+            return Ok(vec![]);
         }
-        return Ok(inode.get_file_data(offset.cast(), size.cast()).await);
+
+        // Ensure `offset + size` is le than the size of the file
+        let read_size: u64 = if offset.cast::<u64>().overflow_add(size.cast::<u64>()) > file_size {
+            file_size.overflow_sub(offset.cast::<u64>())
+        } else {
+            size.cast()
+        };
+
+        let data = self
+            .storage
+            .load(ino, offset.cast(), read_size.cast(), mtime)
+            .await;
+        return Ok(data);
     }
 
     #[instrument(skip(self), err, ret)]
@@ -316,12 +346,27 @@ impl<S: S3BackEnd + Sync + Send + 'static, St: Storage + Send + Sync + 'static> 
             .ok_or_else(|| build_inconsistent_fs!(ino))?;
 
         let inode = inode_wrap;
-        let attr = inode.get_attr();
+        let mut attr = inode.get_attr();
         debug!(
             "getattr() cache hit when searching the attribute of ino={} and name={:?}",
             ino,
             inode.get_name(),
         );
+
+        // fill the local cache of `mtime` and `size` to `attr`
+        {
+            let (local_mtime, local_size) = self.get_local_mtime_and_size(ino);
+
+            if let Some(mtime) = local_mtime {
+                attr.mtime = mtime;
+                attr.ctime = mtime.max(attr.ctime);
+            }
+
+            if let Some(size) = local_size {
+                attr.size = size;
+            }
+        }
+
         let ttl = Duration::new(MY_TTL_SEC, 0);
         let fuse_attr = fs_util::convert_to_fuse_attr(attr);
         Ok((ttl, fuse_attr))
@@ -700,7 +745,22 @@ impl<S: S3BackEnd + Sync + Send + 'static, St: Storage + Send + Sync + 'static> 
             .get_node_from_kv_engine(child_ino)
             .await?
             .ok_or_else(|| build_inconsistent_fs!(child_ino))?;
-        let attr = child_node.lookup_attr();
+        let mut attr = child_node.lookup_attr();
+
+        // fill the local cache of `mtime` and `size` to `attr`
+        {
+            let (local_mtime, local_size) = self.get_local_mtime_and_size(child_ino);
+
+            if let Some(mtime) = local_mtime {
+                attr.mtime = mtime;
+                attr.ctime = mtime.max(attr.ctime);
+            }
+
+            if let Some(size) = local_size {
+                attr.size = size;
+            }
+        }
+
         debug!(
             "ino={} lookup_count={} lookup_attr={:?}",
             child_ino,
@@ -849,14 +909,9 @@ impl<S: S3BackEnd + Sync + Send + 'static, St: Storage + Send + Sync + 'static> 
         _datasync: bool,
         // reply: ReplyEmpty,
     ) -> DatenLordResult<()> {
-        let mut inode = self
-            .get_node_from_kv_engine(ino)
-            .await?
-            .ok_or_else(|| build_inconsistent_fs!(ino))?;
-
-        inode.flush(ino, fh).await;
-
-        Ok(())
+        // We do not have completed metadata cache,
+        // so there are no need to handle the situation that the metadata is not synced.
+        self.flush(ino, fh).await
     }
 
     #[instrument(skip(self), err, ret)]
@@ -864,35 +919,42 @@ impl<S: S3BackEnd + Sync + Send + 'static, St: Storage + Send + Sync + 'static> 
     async fn write_helper(
         &self,
         ino: u64,
-        fh: u64,
+        _fh: u64,
         offset: i64,
         data: Vec<u8>,
-        flags: u32,
+        _lags: u32,
     ) -> DatenLordResult<usize> {
-        let (result, _) = {
-            let mut inode = self
-                .get_node_from_kv_engine(ino)
-                .await?
-                .ok_or_else(|| build_inconsistent_fs!(ino))?;
-            let parent_ino = inode.get_parent_ino();
+        let inode = self
+            .get_node_from_kv_engine(ino)
+            .await?
+            .ok_or_else(|| build_inconsistent_fs!(ino))?;
 
-            debug!(
-                "write_helper() about to write {} byte data to file of ino={} \
-                and name {:?} at offset={}",
-                data.len(),
-                ino,
-                inode.get_name(),
-                offset
-            );
-            let o_flags = fs_util::parse_oflag(flags);
-            let write_to_disk = true;
-            let res = inode
-                .write_file(fh, offset, data, o_flags, write_to_disk)
-                .await;
-            self.set_node_to_kv_engine(ino, inode).await?;
-            (res, parent_ino)
+        debug!(
+            "write_helper() about to write {} byte data to file of ino={} \
+            and name {:?} at offset={}",
+            data.len(),
+            ino,
+            inode.get_name(),
+            offset
+        );
+
+        let (mtime, file_size) = {
+            let (local_mtime, local_size) = self.get_local_mtime_and_size(ino);
+            let file_attr = inode.get_attr();
+            (
+                local_mtime.unwrap_or(file_attr.mtime),
+                local_size.unwrap_or(file_attr.size),
+            )
         };
-        result
+
+        let new_mtime = self.storage.store(ino, offset.cast(), &data, mtime).await;
+        let written_size = data.len();
+        let new_size = file_size.max(offset.cast::<u64>().overflow_add(written_size.cast()));
+
+        self.local_mtime.insert(ino, new_mtime);
+        self.local_size.insert(ino, new_size);
+
+        Ok(written_size)
     }
 }
 
@@ -980,6 +1042,16 @@ impl<S: S3BackEnd + Send + Sync + 'static, St: Storage + Send + Sync + 'static> 
             );
         }
         Ok(parent_node)
+    }
+
+    /// Get the local cache of `mtime` and `size` of a file.
+    fn get_local_mtime_and_size(&self, ino: INum) -> (Option<SystemTime>, Option<u64>) {
+        let guard = pin();
+
+        (
+            self.local_mtime.get(&ino, &guard).copied(),
+            self.local_size.get(&ino, &guard).copied(),
+        )
     }
 
     /// Helper function to pre-check if node can be deferred deleted.

@@ -5,7 +5,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use nix::sys::stat::SFlag;
 
-use super::cache::{IoMemBlock, Storage, StorageManager};
+use super::cache::{IoBlock, Storage, StorageManager};
 use super::dist::server::CacheServer;
 use super::kv_engine::KVEngineType;
 use super::node::Node;
@@ -172,7 +172,7 @@ pub trait MetaData {
         fh: u64,
         offset: i64,
         size: u32,
-    ) -> DatenLordResult<Vec<IoMemBlock>>;
+    ) -> DatenLordResult<Vec<IoBlock>>;
 
     /// Helper function to flush node by ino
     async fn flush(&self, ino: u64, fh: u64) -> DatenLordResult<()>;

@@ -25,7 +25,6 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use async_trait::async_trait;
-use cache::IoMemBlock;
 use clippy_utilities::Cast;
 use dist::server::CacheServer;
 pub use metadata::MetaData;
@@ -188,14 +187,14 @@ impl<M: MetaData + Send + Sync + 'static> MemFs<M> {
     }
 
     /// Read content check
-    fn read_helper(content: Vec<IoMemBlock>, size: usize) -> DatenLordResult<Vec<IoMemBlock>> {
+    fn read_helper<A: AsIoVec>(content: Vec<A>, size: usize) -> DatenLordResult<Vec<A>> {
         if content.iter().filter(|c| !c.can_convert()).count() > 0 {
             return build_error_result_from_errno(
                 Errno::EIO,
                 "The content is out of scope".to_owned(),
             );
         }
-        let content_total_len: usize = content.iter().map(IoMemBlock::len).sum();
+        let content_total_len: usize = content.iter().map(<A as AsIoVec>::len).sum();
         debug!("read {} data, expected size {}", content_total_len, size);
         Ok(content)
     }
@@ -594,6 +593,7 @@ impl<M: MetaData + Send + Sync + 'static> FileSystem for MemFs<M> {
             }
         };
         debug!("file_data is {:?}", file_data);
+        // Check the read data
         match Self::read_helper(file_data, size.cast()) {
             Ok(content) => {
                 debug!(

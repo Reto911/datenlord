@@ -51,8 +51,6 @@ pub trait Node: Sized {
     fn get_lookup_count(&self) -> i64;
     /// Decrease node lookup count
     fn dec_lookup_count_by(&self, nlookup: u64) -> i64;
-    /// Flush node data
-    async fn flush(&mut self, ino: INum, fh: u64);
     /// Duplicate fd
     async fn dup_fd(&self, oflags: OFlag) -> DatenLordResult<RawFd>;
     /// Check whether a node is an empty file or an empty directory
