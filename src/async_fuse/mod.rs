@@ -8,6 +8,11 @@ use self::memfs::kv_engine::KVEngineType;
 use crate::async_fuse::fuse::session;
 use crate::common::etcd_delegate::EtcdDelegate;
 use crate::{AsyncFuseArgs, VolumeType};
+use memfs::cache::policy::LruPolicy;
+use memfs::cache::{
+    BlackHole, BlockCoordinate, InMemoryCache, StorageManager, BLOCK_SIZE_IN_BYTES,
+    MEMORY_CACHE_CAPACITY_IN_BLOCKS,
+};
 
 pub mod fuse;
 pub mod memfs;
@@ -36,9 +41,16 @@ pub async fn start_async_fuse(
     memfs::kv_engine::kv_utils::register_volume(&kv_engine, &args.node_id, &args.volume_info)
         .await?;
     let mount_point = std::path::Path::new(&args.mount_dir);
+
+    let storage = {
+        let lru_policy = LruPolicy::<BlockCoordinate>::new(MEMORY_CACHE_CAPACITY_IN_BLOCKS);
+        let memory_cache = InMemoryCache::new(lru_policy, BlackHole, BLOCK_SIZE_IN_BYTES);
+        StorageManager::new(memory_cache, BLOCK_SIZE_IN_BYTES)
+    };
+
     match args.volume_type {
         VolumeType::S3 => {
-            let fs: memfs::MemFs<memfs::S3MetaData<S3BackEndImpl>> = memfs::MemFs::new(
+            let fs: memfs::MemFs<memfs::S3MetaData<S3BackEndImpl, _>> = memfs::MemFs::new(
                 &args.volume_info,
                 args.cache_capacity,
                 &args.ip_address.to_string(),
@@ -47,6 +59,7 @@ pub async fn start_async_fuse(
                 kv_engine,
                 &args.node_id,
                 &args.volume_info,
+                storage,
             )
             .await?;
 
@@ -54,7 +67,7 @@ pub async fn start_async_fuse(
             ss.run().await?;
         }
         VolumeType::None => {
-            let fs: memfs::MemFs<memfs::S3MetaData<DoNothingImpl>> = memfs::MemFs::new(
+            let fs: memfs::MemFs<memfs::S3MetaData<DoNothingImpl, _>> = memfs::MemFs::new(
                 &args.volume_info,
                 args.cache_capacity,
                 &args.ip_address.to_string(),
@@ -63,6 +76,7 @@ pub async fn start_async_fuse(
                 kv_engine,
                 &args.node_id,
                 &args.volume_info,
+                storage,
             )
             .await?;
 

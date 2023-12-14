@@ -18,7 +18,7 @@ use nix::unistd;
 use parking_lot::RwLock;
 use tracing::debug;
 
-use super::cache::{GlobalCache, IoMemBlock};
+use super::cache::{GlobalCache, IoMemBlock, Storage};
 use super::dir::DirEntry;
 use super::dist::client as dist_client;
 use super::fs_util::{self, FileAttr, NEED_CHECK_PERM};
@@ -139,9 +139,9 @@ impl<S: S3BackEnd + Send + Sync + 'static> S3Node<S> {
     // regardless of the depth or complexity of the recursion within the future.
     // This is crucial in enabling recursive async behavior in Rust.
     // For more information, see https://rust-lang.github.io/async-book/07_workarounds/04_recursion.html
-    pub fn from_serial_node(
+    pub fn from_serial_node<St: Storage + Send + Sync + 'static>(
         serial_node: SerialNode,
-        meta: &S3MetaData<S>,
+        meta: &S3MetaData<S, St>,
     ) -> BoxFuture<'_, DatenLordResult<S3Node<S>>> {
         async move {
             // check if the node is a directory
@@ -339,11 +339,11 @@ impl<S: S3BackEnd + Send + Sync + 'static> S3Node<S> {
 
     /// Open root node
     #[allow(clippy::unnecessary_wraps)]
-    pub(crate) async fn open_root_node(
+    pub(crate) async fn open_root_node<St: Storage + Send + Sync + 'static>(
         root_ino: INum,
         name: &str,
         s3_backend: Arc<S>,
-        meta: Arc<S3MetaData<S>>,
+        meta: Arc<S3MetaData<S, St>>,
     ) -> DatenLordResult<Self> {
         if let Some(root_node) = meta.get_node_from_kv_engine(FUSE_ROOT_ID).await? {
             Ok(root_node)

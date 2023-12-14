@@ -1,5 +1,5 @@
 //! The implementation of user space file system
-mod cache;
+pub mod cache;
 mod dir;
 /// distributed communication module
 pub mod dist;
@@ -35,6 +35,7 @@ pub use s3_metadata::S3MetaData;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, error, info, warn};
 
+use self::cache::StorageManager;
 use self::kv_engine::KVEngineType;
 use crate::async_fuse::fuse::file_system::FileSystem;
 use crate::async_fuse::fuse::fuse_reply::{
@@ -164,6 +165,7 @@ impl<M: MetaData + Send + Sync + 'static> MemFs<M> {
         kv_engine: Arc<KVEngineType>,
         node_id: &str,
         volume_info: &str,
+        storage: StorageManager<<M as MetaData>::St>,
     ) -> anyhow::Result<Self> {
         // print the args
         debug!(
@@ -179,6 +181,7 @@ impl<M: MetaData + Send + Sync + 'static> MemFs<M> {
             kv_engine,
             node_id,
             volume_info,
+            storage,
         )
         .await?;
         Ok(Self { metadata, server })

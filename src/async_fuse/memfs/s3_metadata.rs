@@ -18,7 +18,7 @@ use parking_lot::RwLock as SyncRwLock; // conflict with tokio RwLock
 use tokio::sync::Mutex;
 use tracing::{debug, info, instrument, warn};
 
-use super::cache::{GlobalCache, IoMemBlock};
+use super::cache::{GlobalCache, IoMemBlock, Storage, StorageManager};
 use super::dir::DirEntry;
 use super::dist::server::CacheServer;
 use super::fs_util::{self, FileAttr, NEED_CHECK_PERM};
@@ -38,7 +38,7 @@ use crate::async_fuse::fuse::protocol::{FuseAttr, INum, FUSE_ROOT_ID};
 use crate::async_fuse::memfs::check_name_length;
 use crate::async_fuse::util::build_error_result_from_errno;
 use crate::common::error::Context as DatenLordContext; // conflict with anyhow::Context
-use crate::common::error::{DatenLordError, DatenLordResult};
+use crate::common::error::DatenLordResult;
 use crate::common::etcd_delegate::EtcdDelegate;
 use crate::function_name;
 
@@ -63,11 +63,13 @@ const TXN_RETRY_LIMIT: u32 = 5;
 /// File system in-memory meta-data
 #[derive(Debug)]
 #[allow(dead_code)]
-pub struct S3MetaData<S: S3BackEnd + Send + Sync + 'static> {
+pub struct S3MetaData<S: S3BackEnd + Send + Sync + 'static, St: Storage + Send + Sync + 'static> {
     /// S3 backend
     pub(crate) s3_backend: Arc<S>,
     /// Global data cache
     pub(crate) data_cache: Arc<GlobalCache>,
+    /// Storage manager
+    pub(crate) storage: Arc<StorageManager<St>>,
     /// Current available fd, it'll increase after using
     pub(crate) cur_fd: AtomicU32,
     /// Current service id
@@ -90,8 +92,12 @@ fn parse_s3_info(info: &str) -> DatenLordResult<(&str, &str, &str, &str)> {
 }
 
 #[async_trait]
-impl<S: S3BackEnd + Sync + Send + 'static> MetaData for S3MetaData<S> {
+impl<S: S3BackEnd + Sync + Send + 'static, St: Storage + Send + Sync + 'static> MetaData
+    for S3MetaData<S, St>
+{
     type N = S3Node<S>;
+
+    type St = St;
 
     #[instrument(skip(self))]
     async fn release(
@@ -428,6 +434,7 @@ impl<S: S3BackEnd + Sync + Send + 'static> MetaData for S3MetaData<S> {
         kv_engine: Arc<KVEngineType>,
         node_id: &str,
         volume_info: &str,
+        storage: StorageManager<Self::St>,
     ) -> DatenLordResult<(Arc<Self>, Option<CacheServer>)> {
         let (bucket_name, endpoint, access_key, secret_key) = parse_s3_info(s3_info)?;
         let s3_backend = Arc::new(
@@ -451,6 +458,7 @@ impl<S: S3BackEnd + Sync + Send + 'static> MetaData for S3MetaData<S> {
             fuse_fd: Mutex::new(-1_i32),
             inum_allocator: INumAllocator::new(Arc::clone(&kv_engine)),
             kv_engine,
+            storage: Arc::new(storage),
         });
 
         let server = CacheServer::new(ip.to_owned(), port.to_owned(), data_cache);
@@ -881,7 +889,7 @@ impl<S: S3BackEnd + Sync + Send + 'static> MetaData for S3MetaData<S> {
     }
 }
 
-impl<S: S3BackEnd + Send + Sync + 'static> S3MetaData<S> {
+impl<S: S3BackEnd + Send + Sync + 'static, St: Storage + Send + Sync + 'static> S3MetaData<S, St> {
     #[allow(clippy::unwrap_used)]
     /// Get a node from kv engine by inum
     pub async fn get_node_from_kv_engine(&self, inum: INum) -> DatenLordResult<Option<S3Node<S>>> {

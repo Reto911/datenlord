@@ -6,6 +6,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
+use super::cache::Storage;
 use super::s3_node::S3Node;
 use super::s3_wrapper::S3BackEnd;
 use super::{INum, S3MetaData};
@@ -51,9 +52,12 @@ impl ValueType {
     /// Turn the `ValueType` into `SerialNode` then into `S3Node`.
     /// # Panics
     /// Panics if `ValueType` is not `ValueType::Node`.
-    pub async fn into_s3_node<S: S3BackEnd + Send + Sync + 'static>(
+    pub async fn into_s3_node<
+        S: S3BackEnd + Send + Sync + 'static,
+        St: Storage + Send + Sync + 'static,
+    >(
         self,
-        meta: &S3MetaData<S>,
+        meta: &S3MetaData<S, St>,
     ) -> DatenLordResult<S3Node<S>> {
         match self {
             ValueType::Node(node) => S3Node::from_serial_node(node, meta).await,
