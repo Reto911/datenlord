@@ -68,11 +68,6 @@ pub trait Node: Sized {
         target_path: PathBuf,
     ) -> DatenLordResult<Self>;
     /// Read symlink itself in a directory, not follow symlink
-    async fn load_child_symlink(
-        &self,
-        child_symlink_name: &str,
-        child_attr: Arc<RwLock<FileAttr>>,
-    ) -> DatenLordResult<Self>;
     /// Create sub-directory in a directory
     async fn create_child_dir(
         &mut self,
@@ -102,8 +97,6 @@ pub trait Node: Sized {
         gid: u32,
         global_cache: Arc<GlobalCache>,
     ) -> DatenLordResult<Self>;
-    /// Load data from directory, file or symlink target.
-    async fn load_data(&mut self, offset: usize, len: usize) -> DatenLordResult<usize>;
     /// Insert directory entry for rename()
     fn insert_entry_for_rename(&mut self, child_entry: DirEntry) -> Option<DirEntry>;
     /// Remove directory entry from cache only for rename()
@@ -118,15 +111,6 @@ pub trait Node: Sized {
     async fn statefs(&self) -> DatenLordResult<StatFsParam>;
     /// Get file data
     async fn get_file_data(&self, offset: usize, len: usize) -> Vec<IoMemBlock>;
-    /// Write to file
-    async fn write_file(
-        &mut self,
-        fh: u64,
-        offset: i64,
-        data: Vec<u8>,
-        oflags: OFlag,
-        write_to_disk: bool,
-    ) -> DatenLordResult<usize>;
     /// Close file
     async fn close(&mut self);
     /// Close dir

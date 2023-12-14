@@ -2,8 +2,6 @@
 
 use std::sync::Arc;
 
-use memfs::s3_wrapper::{DoNothingImpl, S3BackEndImpl};
-
 use self::memfs::kv_engine::KVEngineType;
 use crate::async_fuse::fuse::session;
 use crate::common::etcd_delegate::EtcdDelegate;
@@ -50,7 +48,7 @@ pub async fn start_async_fuse(
 
     match args.volume_type {
         VolumeType::S3 => {
-            let fs: memfs::MemFs<memfs::S3MetaData<S3BackEndImpl, _>> = memfs::MemFs::new(
+            let fs: memfs::MemFs<memfs::S3MetaData<_>> = memfs::MemFs::new(
                 &args.volume_info,
                 args.cache_capacity,
                 &args.ip_address.to_string(),
@@ -67,7 +65,7 @@ pub async fn start_async_fuse(
             ss.run().await?;
         }
         VolumeType::None => {
-            let fs: memfs::MemFs<memfs::S3MetaData<DoNothingImpl, _>> = memfs::MemFs::new(
+            let fs: memfs::MemFs<memfs::S3MetaData<_>> = memfs::MemFs::new(
                 &args.volume_info,
                 args.cache_capacity,
                 &args.ip_address.to_string(),

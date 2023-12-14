@@ -7,10 +7,8 @@ use std::sync::atomic::AtomicU32;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
-use anyhow::Context;
 use async_trait::async_trait;
 use clippy_utilities::{Cast, OverflowArithmetic};
-use itertools::Itertools;
 use lockfree_cuckoohash::{pin, LockFreeCuckooHash as HashMap};
 use nix::errno::Errno;
 use nix::fcntl::OFlag;
@@ -30,7 +28,6 @@ use super::kv_engine::{KVEngine, KVEngineType, KeyType, ValueType};
 use super::metadata::{error, MetaData, ReqContext};
 use super::node::Node;
 use super::s3_node::S3Node;
-use super::s3_wrapper::S3BackEnd;
 use super::{CreateParam, RenameParam, SetAttrParam};
 #[cfg(feature = "abi-7-18")]
 use crate::async_fuse::fuse::fuse_reply::FuseDeleteNotification;
@@ -55,17 +52,13 @@ macro_rules! build_inconsistent_fs {
 const MY_TTL_SEC: u64 = 3600; // TODO: should be a long value, say 1 hour
 /// The generation ID of FUSE attributes
 const MY_GENERATION: u64 = 1; // TODO: find a proper way to set generation
-/// S3 information string delimiter
-const S3_INFO_DELIMITER: char = ';';
 /// The limit of transaction commit retrying times.
 const TXN_RETRY_LIMIT: u32 = 5;
 
 /// File system in-memory meta-data
 #[derive(Debug)]
 #[allow(dead_code)]
-pub struct S3MetaData<S: S3BackEnd + Send + Sync + 'static, St: Storage + Send + Sync + 'static> {
-    /// S3 backend
-    pub(crate) s3_backend: Arc<S>,
+pub struct S3MetaData<St: Storage + Send + Sync + 'static> {
     /// Global data cache
     pub(crate) data_cache: Arc<GlobalCache>,
     /// Storage manager
@@ -88,18 +81,9 @@ pub struct S3MetaData<S: S3BackEnd + Send + Sync + 'static, St: Storage + Send +
     local_size: HashMap<INum, u64>,
 }
 
-/// Parse S3 info
-fn parse_s3_info(info: &str) -> DatenLordResult<(&str, &str, &str, &str)> {
-    info.split(S3_INFO_DELIMITER)
-        .next_tuple()
-        .ok_or_else(|| anyhow::anyhow!("parse s3 information failed. s3_info: {info}").into())
-}
-
 #[async_trait]
-impl<S: S3BackEnd + Sync + Send + 'static, St: Storage + Send + Sync + 'static> MetaData
-    for S3MetaData<S, St>
-{
-    type N = S3Node<S>;
+impl<St: Storage + Send + Sync + 'static> MetaData for S3MetaData<St> {
+    type N = S3Node;
 
     type St = St;
 
@@ -168,16 +152,14 @@ impl<S: S3BackEnd + Sync + Send + 'static, St: Storage + Send + Sync + 'static> 
             num_child_entries
         };
 
-        let mut inode = self
+        let inode = self
             .get_node_from_kv_engine(ino)
             .await?
             .ok_or_else(|| build_inconsistent_fs!(ino))?;
         inode
             .get_attr()
             .check_perm(context.user_id, context.group_id, 5)?;
-        if inode.need_load_dir_data() {
-            inode.load_data(0_usize, 0_usize).await?;
-        }
+
         let num_child_entries = inode.read_dir(&mut readdir_helper);
         debug!(
             "readdir() successfully read {} entries \
@@ -506,7 +488,7 @@ impl<S: S3BackEnd + Sync + Send + 'static, St: Storage + Send + Sync + 'static> 
     }
 
     async fn new(
-        s3_info: &str,
+        _s3_info: &str,
         capacity: usize,
         ip: &str,
         port: &str,
@@ -516,12 +498,6 @@ impl<S: S3BackEnd + Sync + Send + 'static, St: Storage + Send + Sync + 'static> 
         volume_info: &str,
         storage: StorageManager<Self::St>,
     ) -> DatenLordResult<(Arc<Self>, Option<CacheServer>)> {
-        let (bucket_name, endpoint, access_key, secret_key) = parse_s3_info(s3_info)?;
-        let s3_backend = Arc::new(
-            S::new_backend(bucket_name, endpoint, access_key, secret_key)
-                .await
-                .context("Failed to create s3 backend.")?,
-        );
         let data_cache = Arc::new(GlobalCache::new_dist_with_bz_and_capacity(
             10_485_760, // 10 * 1024 * 1024
             capacity,
@@ -530,7 +506,6 @@ impl<S: S3BackEnd + Sync + Send + 'static, St: Storage + Send + Sync + 'static> 
         ));
 
         let meta = Arc::new(Self {
-            s3_backend: Arc::clone(&s3_backend),
             data_cache: Arc::<GlobalCache>::clone(&data_cache),
             cur_fd: AtomicU32::new(4),
             node_id: Arc::<str>::from(node_id.to_owned()),
@@ -549,7 +524,7 @@ impl<S: S3BackEnd + Sync + Send + 'static, St: Storage + Send + Sync + 'static> 
             let mut txn = meta.kv_engine.new_meta_txn().await;
             let prev = txn.get(&KeyType::INum2Node(FUSE_ROOT_ID)).await?;
             if let Some(value) = prev {
-                let prev_root_node: S3Node<S> = value.into_s3_node(&meta).await?;
+                let prev_root_node: S3Node = value.into_s3_node(&meta).await?;
                 info!(
                     "[init] root node already exists root_node file_attr {:?}, skip init",
                     prev_root_node.get_attr()
@@ -559,14 +534,9 @@ impl<S: S3BackEnd + Sync + Send + 'static, St: Storage + Send + Sync + 'static> 
                 (Ok(true), ())
             } else {
                 info!("[init] root node not exists, init root node");
-                let root_inode = S3Node::open_root_node(
-                    FUSE_ROOT_ID,
-                    "/",
-                    Arc::<S>::clone(&s3_backend),
-                    Arc::clone(&meta),
-                )
-                .await
-                .add_context("failed to open FUSE root node")?;
+                let root_inode = S3Node::open_root_node(FUSE_ROOT_ID, "/", Arc::clone(&meta))
+                    .await
+                    .add_context("failed to open FUSE root node")?;
                 // insert (FUSE_ROOT_ID -> root_inode) into KV engine
                 meta.set_node_to_kv_engine(FUSE_ROOT_ID, root_inode).await?;
                 (txn.commit().await, ())
@@ -977,10 +947,10 @@ impl<S: S3BackEnd + Sync + Send + 'static, St: Storage + Send + Sync + 'static> 
     }
 }
 
-impl<S: S3BackEnd + Send + Sync + 'static, St: Storage + Send + Sync + 'static> S3MetaData<S, St> {
+impl<St: Storage + Send + Sync + 'static> S3MetaData<St> {
     #[allow(clippy::unwrap_used)]
     /// Get a node from kv engine by inum
-    pub async fn get_node_from_kv_engine(&self, inum: INum) -> DatenLordResult<Option<S3Node<S>>> {
+    pub async fn get_node_from_kv_engine(&self, inum: INum) -> DatenLordResult<Option<S3Node>> {
         let inum_key = KeyType::INum2Node(inum);
         let raw_data = self.kv_engine.get(&inum_key).await.add_context(format!(
             "{}() failed to get node of ino={inum} from kv engine",
@@ -995,7 +965,7 @@ impl<S: S3BackEnd + Send + Sync + 'static, St: Storage + Send + Sync + 'static> 
     }
 
     /// Set node to kv engine use inum
-    pub async fn set_node_to_kv_engine(&self, inum: INum, node: S3Node<S>) -> DatenLordResult<()> {
+    pub async fn set_node_to_kv_engine(&self, inum: INum, node: S3Node) -> DatenLordResult<()> {
         let inum_key = KeyType::INum2Node(inum);
         let node_value = ValueType::Node(node.into_serial_node());
         self.kv_engine
@@ -1031,7 +1001,7 @@ impl<S: S3BackEnd + Send + Sync + 'static, St: Storage + Send + Sync + 'static> 
         node_name: &str,
         user_id: u32,
         group_id: u32,
-    ) -> DatenLordResult<S3Node<S>> {
+    ) -> DatenLordResult<S3Node> {
         let parent_node = self.get_node_from_kv_engine(parent).await?.ok_or_else(|| {
             error::build_inconsistent_fs_with_context(
                 function_name!(),
@@ -1092,7 +1062,7 @@ impl<S: S3BackEnd + Send + Sync + 'static, St: Storage + Send + Sync + 'static> 
     }
 
     /// Helper function to pre-check if node can be deferred deleted.
-    fn deferred_delete_pre_check(inode: &S3Node<S>) -> (bool, INum, String) {
+    fn deferred_delete_pre_check(inode: &S3Node) -> (bool, INum, String) {
         debug_assert!(inode.get_lookup_count() >= 0); // lookup count cannot be negative
         debug_assert!(inode.get_open_count() >= 0);
         // pre-check whether deferred delete or not
@@ -1257,8 +1227,8 @@ impl<S: S3BackEnd + Send + Sync + 'static, St: Storage + Send + Sync + 'static> 
         old_name: &str,
         new_parent: INum,
         new_name: &str,
-    ) -> DatenLordResult<(S3Node<S>, INum, Option<S3Node<S>>, INum)> {
-        let check_node_is_dir = |node: &S3Node<S>| {
+    ) -> DatenLordResult<(S3Node, INum, Option<S3Node>, INum)> {
+        let check_node_is_dir = |node: &S3Node| {
             if node.get_type() == SFlag::S_IFDIR {
                 Ok(())
             } else {
@@ -1269,7 +1239,7 @@ impl<S: S3BackEnd + Send + Sync + 'static, St: Storage + Send + Sync + 'static> 
             }
         };
 
-        let build_enoent = |name: &str, parent: INum, parent_node: &S3Node<S>| {
+        let build_enoent = |name: &str, parent: INum, parent_node: &S3Node| {
             build_error_result_from_errno(
                 Errno::ENOENT,
                 format!(
@@ -1683,7 +1653,7 @@ impl<S: S3BackEnd + Send + Sync + 'static, St: Storage + Send + Sync + 'static> 
     /// file, or the superuser can rename or delete files.
     fn check_sticky_bit(
         context: &ReqContext,
-        parent_node: &S3Node<S>,
+        parent_node: &S3Node,
         child_entry: &DirEntry,
     ) -> DatenLordResult<()> {
         let parent_attr = parent_node.get_attr();

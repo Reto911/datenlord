@@ -54,7 +54,8 @@ pub struct MemFs<M: MetaData + Send + Sync + 'static> {
     /// Fs metadata
     metadata: Arc<M>,
     #[allow(dead_code)]
-    /// Cache server
+    /// Cache server.
+    /// It works as an RAII handler, thus its methods are not called.
     server: Option<CacheServer>,
 }
 

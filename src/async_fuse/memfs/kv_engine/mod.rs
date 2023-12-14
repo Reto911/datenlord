@@ -8,7 +8,6 @@ use serde::{Deserialize, Serialize};
 
 use super::cache::Storage;
 use super::s3_node::S3Node;
-use super::s3_wrapper::S3BackEnd;
 use super::{INum, S3MetaData};
 use crate::async_fuse::memfs::dist::id_alloc::IdType;
 use crate::common::async_fuse_error::KVEngineError;
@@ -52,13 +51,10 @@ impl ValueType {
     /// Turn the `ValueType` into `SerialNode` then into `S3Node`.
     /// # Panics
     /// Panics if `ValueType` is not `ValueType::Node`.
-    pub async fn into_s3_node<
-        S: S3BackEnd + Send + Sync + 'static,
-        St: Storage + Send + Sync + 'static,
-    >(
+    pub async fn into_s3_node<St: Storage + Send + Sync + 'static>(
         self,
-        meta: &S3MetaData<S, St>,
-    ) -> DatenLordResult<S3Node<S>> {
+        meta: &S3MetaData<St>,
+    ) -> DatenLordResult<S3Node> {
         match self {
             ValueType::Node(node) => S3Node::from_serial_node(node, meta).await,
             _ => {
