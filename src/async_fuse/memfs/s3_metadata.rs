@@ -59,8 +59,6 @@ const TXN_RETRY_LIMIT: u32 = 5;
 #[derive(Debug)]
 #[allow(dead_code)]
 pub struct S3MetaData<St: Storage + Send + Sync + 'static> {
-    /// Global data cache
-    pub(crate) data_cache: Arc<GlobalCache>,
     /// Storage manager
     pub(crate) storage: Arc<StorageManager<St>>,
     /// Current available fd, it'll increase after using
@@ -506,7 +504,6 @@ impl<St: Storage + Send + Sync + 'static> MetaData for S3MetaData<St> {
         ));
 
         let meta = Arc::new(Self {
-            data_cache: Arc::<GlobalCache>::clone(&data_cache),
             cur_fd: AtomicU32::new(4),
             node_id: Arc::<str>::from(node_id.to_owned()),
             volume_info: Arc::<str>::from(volume_info.to_owned()),
@@ -644,7 +641,6 @@ impl<St: Storage + Send + Sync + 'static> MetaData for S3MetaData<St> {
                         m_flags,
                         uid,
                         gid,
-                        Arc::<GlobalCache>::clone(&self.data_cache),
                     )
                     .await
                     .add_context(format!(

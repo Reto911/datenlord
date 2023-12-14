@@ -7,7 +7,6 @@ use nix::sys::stat::SFlag;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 
-use super::cache::GlobalCache;
 use super::dir::DirEntry;
 use super::fs_util::FileAttr;
 use super::s3_node::S3NodeData;
@@ -93,7 +92,8 @@ pub enum SerialNodeData {
 
 impl SerialNodeData {
     /// Deserializes the node data
-    pub fn into_s3_nodedata(self, data_cache: Arc<GlobalCache>) -> S3NodeData {
+    #[must_use]
+    pub fn into_s3_nodedata(self) -> S3NodeData {
         match self {
             SerialNodeData::Directory(dir) => {
                 let mut dir_entry_map = BTreeMap::new();
@@ -102,7 +102,7 @@ impl SerialNodeData {
                 }
                 S3NodeData::Directory(dir_entry_map)
             }
-            SerialNodeData::File => S3NodeData::RegFile(data_cache),
+            SerialNodeData::File => S3NodeData::RegFile,
             SerialNodeData::SymLink(path) => S3NodeData::SymLink(path),
         }
     }
