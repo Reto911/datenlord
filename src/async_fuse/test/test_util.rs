@@ -11,7 +11,11 @@ use tracing::{debug, info}; // warn, error
 
 use crate::async_fuse::fuse::{mount, session};
 use crate::async_fuse::memfs;
-use crate::async_fuse::memfs::cache::MEMORY_CACHE_CAPACITY_IN_BLOCKS;
+use crate::async_fuse::memfs::cache::policy::LruPolicy;
+use crate::async_fuse::memfs::cache::{
+    BackendBuilder, BlockCoordinate, MemoryCacheBuilder, StorageManager, BLOCK_SIZE_IN_BYTES,
+    MEMORY_CACHE_CAPACITY_IN_BLOCKS,
+};
 use crate::async_fuse::memfs::kv_engine::{KVEngine, KVEngineType};
 use crate::async_fuse::memfs::s3_wrapper::DoNothingImpl;
 use crate::common::logger::{init_logger, LogRole};
@@ -24,12 +28,18 @@ pub const TEST_ETCD_ENDPOINT: &str = "127.0.0.1:2379";
 /// The default capacity in bytes for test, 1GB
 const CACHE_DEFAULT_CAPACITY: usize = 1024 * 1024 * 1024;
 
-fn test_storage_config() -> StorageConfig {
-    let s3_config = StorageS3Config {
-        endpoint_url: "http://127.0.0.1:9000".to_owned(),
-        access_key_id: "test".to_owned(),
-        secret_access_key: "test1234".to_owned(),
-        bucket_name: "fuse-test-bucket".to_owned(),
+fn test_storage_config(is_s3: bool) -> StorageConfig {
+    let params = if is_s3 {
+        let s3_config = StorageS3Config {
+            endpoint_url: "http://127.0.0.1:9000".to_owned(),
+            access_key_id: "test".to_owned(),
+            secret_access_key: "test1234".to_owned(),
+            bucket_name: "fuse-test-bucket".to_owned(),
+        };
+
+        StorageParams::S3(s3_config)
+    } else {
+        StorageParams::Fs("/tmp/datenlord_backend".to_owned())
     };
 
     let soft_limit = SoftLimit(
@@ -43,8 +53,67 @@ fn test_storage_config() -> StorageConfig {
             write_back: false,
             soft_limit,
         },
-        params: StorageParams::S3(s3_config),
+        params,
     }
+}
+
+async fn run_fs(mount_point: &Path, is_s3: bool) -> anyhow::Result<()> {
+    let storage_config = test_storage_config(is_s3);
+    let kv_engine: Arc<memfs::kv_engine::etcd_impl::EtcdKVEngine> =
+        Arc::new(KVEngineType::new(vec![TEST_ETCD_ENDPOINT.to_owned()]).await?);
+
+    let storage = {
+        let storage_param = &storage_config.params;
+        let memory_cache_config = &storage_config.memory_cache_config;
+
+        let backend = BackendBuilder::new(storage_param.clone(), BLOCK_SIZE_IN_BYTES).build()?;
+        let lru_policy = LruPolicy::<BlockCoordinate>::new(memory_cache_config.capacity);
+        let memory_cache = MemoryCacheBuilder::new(lru_policy, backend, BLOCK_SIZE_IN_BYTES)
+            .command_queue_limit(memory_cache_config.command_queue_limit)
+            .limit(memory_cache_config.soft_limit)
+            .write_through(!memory_cache_config.write_back)
+            .build();
+        StorageManager::new(memory_cache, BLOCK_SIZE_IN_BYTES)
+    };
+
+    // TODO: remove the `if` statement when `S3Backend` is removed.
+    if is_s3 {
+        let fs: memfs::MemFs<memfs::S3MetaData<DoNothingImpl, _>> = memfs::MemFs::new(
+            mount_point
+                .as_os_str()
+                .to_str()
+                .unwrap_or_else(|| panic!("failed to convert to utf8 string")),
+            CACHE_DEFAULT_CAPACITY,
+            TEST_NODE_IP,
+            TEST_PORT,
+            kv_engine,
+            TEST_NODE_ID,
+            &storage_config,
+            storage,
+        )
+        .await?;
+        let ss = session::new_session_of_memfs(mount_point, fs).await?;
+        ss.run().await?;
+    } else {
+        let fs: memfs::MemFs<memfs::S3MetaData<DoNothingImpl, _>> = memfs::MemFs::new(
+            mount_point
+                .as_os_str()
+                .to_str()
+                .unwrap_or_else(|| panic!("failed to convert to utf8 string")),
+            CACHE_DEFAULT_CAPACITY,
+            TEST_NODE_IP,
+            TEST_PORT,
+            Arc::<KVEngineType>::clone(&kv_engine),
+            TEST_NODE_ID,
+            &storage_config,
+            storage,
+        )
+        .await?;
+        let ss = session::new_session_of_memfs(mount_point, fs).await?;
+        ss.run().await?;
+    };
+
+    Ok(())
 }
 
 #[allow(clippy::let_underscore_must_use)]
@@ -76,46 +145,6 @@ pub async fn setup(mount_dir: &Path, is_s3: bool) -> anyhow::Result<tokio::task:
     let abs_root_path = fs::canonicalize(mount_dir)?;
 
     let fs_task = tokio::task::spawn(async move {
-        async fn run_fs(mount_point: &Path, is_s3: bool) -> anyhow::Result<()> {
-            let storage_config = test_storage_config();
-            let kv_engine: Arc<memfs::kv_engine::etcd_impl::EtcdKVEngine> =
-                Arc::new(KVEngineType::new(vec![TEST_ETCD_ENDPOINT.to_owned()]).await?);
-            if is_s3 {
-                let fs: memfs::MemFs<memfs::S3MetaData<DoNothingImpl>> = memfs::MemFs::new(
-                    mount_point
-                        .as_os_str()
-                        .to_str()
-                        .unwrap_or_else(|| panic!("failed to convert to utf8 string")),
-                    CACHE_DEFAULT_CAPACITY,
-                    TEST_NODE_IP,
-                    TEST_PORT,
-                    kv_engine,
-                    TEST_NODE_ID,
-                    &storage_config,
-                )
-                .await?;
-                let ss = session::new_session_of_memfs(mount_point, fs).await?;
-                ss.run().await?;
-            } else {
-                let fs: memfs::MemFs<memfs::S3MetaData<DoNothingImpl>> = memfs::MemFs::new(
-                    mount_point
-                        .as_os_str()
-                        .to_str()
-                        .unwrap_or_else(|| panic!("failed to convert to utf8 string")),
-                    CACHE_DEFAULT_CAPACITY,
-                    TEST_NODE_IP,
-                    TEST_PORT,
-                    Arc::<KVEngineType>::clone(&kv_engine),
-                    TEST_NODE_ID,
-                    &storage_config,
-                )
-                .await?;
-                let ss = session::new_session_of_memfs(mount_point, fs).await?;
-                ss.run().await?;
-            };
-
-            Ok(())
-        }
         if let Err(e) = run_fs(&abs_root_path, is_s3).await {
             panic!(
                 "failed to run filesystem, the error is: {}",

@@ -5,6 +5,10 @@ use std::sync::Arc;
 use datenlord::config::StorageParams;
 use memfs::s3_wrapper::{DoNothingImpl, S3BackEndImpl};
 
+use self::memfs::cache::policy::LruPolicy;
+use self::memfs::cache::{
+    BackendBuilder, BlockCoordinate, MemoryCacheBuilder, StorageManager, BLOCK_SIZE_IN_BYTES,
+};
 use self::memfs::kv_engine::KVEngineType;
 use crate::async_fuse::fuse::session;
 use crate::AsyncFuseArgs;
@@ -36,21 +40,39 @@ pub async fn start_async_fuse(
     )
     .await?;
 
-    let volume_info = serde_json::to_string(&args.storage_config)?;
+    let storage_config = &args.storage_config;
+
+    let volume_info = serde_json::to_string(storage_config)?;
     memfs::kv_engine::kv_utils::register_volume(&kv_engine, &args.node_id, &volume_info).await?;
 
     let mount_point = std::path::Path::new(&args.mount_dir);
 
+    let storage = {
+        let storage_param = &storage_config.params;
+        let memory_cache_config = &storage_config.memory_cache_config;
+
+        let backend = BackendBuilder::new(storage_param.clone(), BLOCK_SIZE_IN_BYTES).build()?;
+        let lru_policy = LruPolicy::<BlockCoordinate>::new(memory_cache_config.capacity);
+        let memory_cache = MemoryCacheBuilder::new(lru_policy, backend, BLOCK_SIZE_IN_BYTES)
+            .command_queue_limit(memory_cache_config.command_queue_limit)
+            .limit(memory_cache_config.soft_limit)
+            .write_through(!memory_cache_config.write_back)
+            .build();
+        StorageManager::new(memory_cache, BLOCK_SIZE_IN_BYTES)
+    };
+
+    // TODO: Remove this matching when `S3Baackend` is removed.
     match args.storage_config.params {
         StorageParams::S3(_) => {
-            let fs: memfs::MemFs<memfs::S3MetaData<S3BackEndImpl>> = memfs::MemFs::new(
+            let fs: memfs::MemFs<memfs::S3MetaData<S3BackEndImpl, _>> = memfs::MemFs::new(
                 &args.mount_dir,
                 CACHE_DEFAULT_CAPACITY,
                 &args.ip_address.to_string(),
                 args.server_port,
                 kv_engine,
                 &args.node_id,
-                &args.storage_config,
+                storage_config,
+                storage,
             )
             .await?;
 
@@ -58,14 +80,15 @@ pub async fn start_async_fuse(
             ss.run().await?;
         }
         StorageParams::Fs(_) => {
-            let fs: memfs::MemFs<memfs::S3MetaData<DoNothingImpl>> = memfs::MemFs::new(
+            let fs: memfs::MemFs<memfs::S3MetaData<DoNothingImpl, _>> = memfs::MemFs::new(
                 &args.mount_dir,
                 CACHE_DEFAULT_CAPACITY,
                 &args.ip_address.to_string(),
                 args.server_port,
                 kv_engine,
                 &args.node_id,
-                &args.storage_config,
+                storage_config,
+                storage,
             )
             .await?;
 
