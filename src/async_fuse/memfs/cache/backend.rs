@@ -2,8 +2,11 @@
 
 use async_trait::async_trait;
 use clippy_utilities::OverflowArithmetic;
+use datenlord::config::{StorageParams, StorageS3Config};
 use futures::{stream, AsyncReadExt, AsyncWriteExt, StreamExt};
+use opendal::services::{Fs, S3};
 use opendal::{ErrorKind, Operator};
+use tracing::warn;
 
 use super::{Block, Storage};
 use crate::async_fuse::fuse::protocol::INum;
@@ -25,6 +28,48 @@ impl BackendWrapper {
             operator,
             block_size,
         }
+    }
+
+    /// Create a new backend from `StorageParams`.
+    pub fn from_storage_parameters(
+        config: &StorageParams,
+        block_size: usize,
+    ) -> opendal::Result<Self> {
+        let operator = match *config {
+            StorageParams::S3(StorageS3Config {
+                ref endpoint_url,
+                ref access_key_id,
+                ref secret_access_key,
+                ref bucket_name,
+            }) => {
+                let mut builder = S3::default();
+
+                builder
+                    .endpoint(endpoint_url)
+                    .access_key_id(access_key_id)
+                    .secret_access_key(secret_access_key)
+                    .region("auto")
+                    .bucket(bucket_name);
+
+                Operator::new(builder)?.finish()
+            }
+            StorageParams::Fs(ref root) => {
+                let root = if root.is_empty() {
+                    warn!("Argument `--storage-fs-root` is not set while `--storage-type` is set to `fs`. using `/tmp/datenlord_backend` as default.");
+                    "/tmp/datenlord_backend"
+                } else {
+                    root.as_str()
+                };
+
+                let mut builder = Fs::default();
+                builder.root(root);
+                Operator::new(builder)?.finish()
+            }
+        };
+        Ok(Self {
+            operator,
+            block_size,
+        })
     }
 
     /// Get file path by `ino`

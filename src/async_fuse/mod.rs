@@ -18,6 +18,9 @@ pub mod metrics;
 pub mod proactor;
 pub mod util;
 
+/// The default capacity in bytes for legacy `GlobalCache`, 8GB
+const CACHE_DEFAULT_CAPACITY: usize = 8 * 1024 * 1024 * 1024;
+
 /// Start async-fuse
 pub async fn start_async_fuse(
     kv_engine: Arc<KVEngineType>,
@@ -42,7 +45,7 @@ pub async fn start_async_fuse(
         StorageParams::S3(_) => {
             let fs: memfs::MemFs<memfs::S3MetaData<S3BackEndImpl>> = memfs::MemFs::new(
                 &args.mount_dir,
-                args.storage_config.cache_capacity,
+                CACHE_DEFAULT_CAPACITY,
                 &args.ip_address.to_string(),
                 args.server_port,
                 kv_engine,
@@ -54,10 +57,10 @@ pub async fn start_async_fuse(
             let ss = session::new_session_of_memfs(mount_point, fs).await?;
             ss.run().await?;
         }
-        StorageParams::None(_) => {
+        StorageParams::Fs(_) => {
             let fs: memfs::MemFs<memfs::S3MetaData<DoNothingImpl>> = memfs::MemFs::new(
                 &args.mount_dir,
-                args.storage_config.cache_capacity,
+                CACHE_DEFAULT_CAPACITY,
                 &args.ip_address.to_string(),
                 args.server_port,
                 kv_engine,
