@@ -12,10 +12,10 @@ mod storage_manager;
 
 pub mod policy;
 
-pub use backend::BackendWrapper;
+pub use backend::{BackendBuilder, BackendWrapper};
 pub use block::{Block, BlockCoordinate};
 pub use global_cache::*;
-pub use memory_cache::{MemoryCache, MemoryCacheBuilder, SoftLimit};
+pub use memory_cache::{MemoryCache, MemoryCacheBuilder};
 pub use storage::Storage;
 pub use storage_manager::StorageManager;
 
