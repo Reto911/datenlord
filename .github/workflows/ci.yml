@@ -60,6 +60,7 @@ jobs:
           command: check
 
   csi-sanity-test:
+    needs: ["check", "clippy", "fmt"]
     name: CSI-Sanity-Test
     runs-on: ubuntu-latest
     steps:
@@ -156,6 +157,7 @@ jobs:
           args: --all-features --all-targets -- -D warnings
 
   fstest:
+    needs: ["check", "clippy", "fmt"]
     name: fstest
     runs-on: ubuntu-latest
     steps:
