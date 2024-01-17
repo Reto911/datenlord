@@ -83,7 +83,11 @@ pub fn init_logger(role: LogRole) {
         .with_span_events(FmtSpan::NEW | FmtSpan::CLOSE)
         .with_filter(filter);
 
-    let subscriber = tracing_subscriber::Registry::default().with(layer);
+    let console_layer = console_subscriber::spawn();
+
+    let subscriber = tracing_subscriber::Registry::default()
+        .with(console_layer)
+        .with(layer);
 
     if cfg!(test) {
         let _: Result<(), tracing::subscriber::SetGlobalDefaultError> =
